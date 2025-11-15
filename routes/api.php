@@ -338,8 +338,8 @@ Route::prefix('/v1')->group(function () {
         Route::post('mails/replyContactForm', [ContactsController::class, 'replyContactForm']);
 
         Route::get('settings/getById', [SettingsController::class, 'getById']);
-        Route::post('setttings/update', [SettingsController::class, 'update']);
-        Route::post('setttings/save', [SettingsController::class, 'save']);
+        Route::post('settings/update', [SettingsController::class, 'update']);
+        Route::post('settings/save', [SettingsController::class, 'save']);
 
         Route::get('users/admins', [AuthController::class, 'admins']);
         Route::post('users/deleteUser', [AuthController::class, 'delete']);

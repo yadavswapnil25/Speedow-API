@@ -255,8 +255,8 @@ class ProductOrdersController extends Controller
             } else {
                 $freelancerInfo = User::select('id', 'first_name', 'last_name', 'cover', 'type')->where('id', $loop->salon_id)->first();
             }
-            $loop->type = $freelancerInfo->type;
-            if ($freelancerInfo->type == "individual") {
+            $loop->type = @$freelancerInfo->type;
+            if (@$freelancerInfo->type == "individual") {
                 $loop->freelancerInfo = $freelancerInfo;
             } else {
                 $loop->salonInfo = Salon::select('name', 'cover', 'address')->where('uid', $loop->salon_id)->first();

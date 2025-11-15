@@ -16,6 +16,8 @@ use App\Models\Specialist;
 use App\Models\Packages;
 use App\Models\Commission;
 use App\Models\Products;
+use App\Models\Timeslots;
+use Carbon\Carbon;
 use Illuminate\Support\Arr;
 use Validator;
 use DB;
@@ -123,12 +125,31 @@ class SalonController extends Controller
 
     public function getSearchResult(Request $request)
     {
-        $str = "";
-        if ($request->has('param') && $request->has('lat') && $request->has('lng')) {
-            $str = $request->param;
-            $lat = $request->lat;
-            $lng = $request->lng;
+        if (!$request->has('lat') || !$request->has('lng')) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Latitude and longitude are required for search.',
+                'status' => 422
+            ], 422);
         }
+
+        $str = $request->input('param', '');
+        $lat = $request->lat;
+        $lng = $request->lng;
+
+        $timeFilter = strtolower((string) $request->input('time_filter', ''));
+        $availabilityFilter = strtolower((string) $request->input('availability_filter', ''));
+        $customTimeFrom = $request->input('time_from');
+        $customTimeTo = $request->input('time_to');
+        $onlineOnly = filter_var($request->input('online_only', false), FILTER_VALIDATE_BOOLEAN);
+
+        $timeWindow = $this->resolveTimeWindow($timeFilter, $customTimeFrom, $customTimeTo);
+        $availabilityDate = $this->resolveAvailabilityDate($availabilityFilter);
+        if (!$availabilityDate && $timeWindow) {
+            $availabilityDate = Carbon::now(config('app.timezone'));
+        }
+        $shouldFilterBySchedule = $timeWindow !== null || $availabilityDate !== null;
+
         $searchQuery = Settings::select('allowDistance', 'searchResultKind')->first();
         $categories = Category::where(['status' => 1])->get();
         if ($searchQuery->searchResultKind == 1) {
@@ -139,21 +160,49 @@ class SalonController extends Controller
             $distanceType = 'km';
         }
 
-        $salon = Salon::select(DB::raw('salon.id as id,salon.uid as uid,salon.name as name,salon.rating as rating,
+        $salonQuery = Salon::select(DB::raw('salon.id as id,salon.uid as uid,salon.name as name,salon.rating as rating,
         salon.total_rating as total_rating,salon.address as address,salon.cover as cover,salon.lat as salon_lat,salon.lng as salon_lng, ( ' . $values . ' * acos( cos( radians(' . $lat . ') ) * cos( radians( lat ) ) * cos( radians( lng ) - radians(' . $lng . ') ) + sin( radians(' . $lat . ') ) * sin( radians( lat ) ) ) ) AS distance'))
+            ->addSelect('users.status as user_status')
+            ->leftJoin('users', 'salon.uid', '=', 'users.id')
             ->having('distance', '<', (int) $searchQuery->allowDistance)
             ->orderBy('distance')
             ->where('salon.name', 'like', '%' . $str . '%')
-            ->where(['salon.status' => 1, 'salon.in_home' => 1])
-            ->get();
+            ->where(['salon.status' => 1, 'salon.in_home' => 1]);
 
-        $freelancer = Individual::select(DB::raw('individual.id as id,individual.uid as uid,individual.categories,individual.lat as lat,individual.lng as lng,users.first_name as first_name,users.last_name as last_name,users.cover as cover, ( ' . $values . ' * acos( cos( radians(' . $lat . ') ) * cos( radians( lat ) ) * cos( radians( lng ) - radians(' . $lng . ') ) + sin( radians(' . $lat . ') ) * sin( radians( lat ) ) ) ) AS distance'))
+        if ($onlineOnly) {
+            $salonQuery = $salonQuery->where('users.status', 1);
+        }
+
+        $salon = $salonQuery->get();
+
+        $freelancerQuery = Individual::select(DB::raw('individual.id as id,individual.uid as uid,individual.categories,individual.lat as lat,individual.lng as lng,users.first_name as first_name,users.last_name as last_name,users.cover as cover, ( ' . $values . ' * acos( cos( radians(' . $lat . ') ) * cos( radians( lat ) ) * cos( radians( lng ) - radians(' . $lng . ') ) + sin( radians(' . $lat . ') ) * sin( radians( lat ) ) ) ) AS distance'))
+            ->addSelect('users.status as user_status')
             ->having('distance', '<', (int) $searchQuery->allowDistance)
             ->orderBy('distance')
             ->join('users', 'individual.uid', 'users.id')
             ->where('users.first_name', 'like', '%' . $str . '%')
-            ->where(['individual.status' => 1, 'individual.in_home' => 1])
-            ->get();
+            ->where(['individual.status' => 1, 'individual.in_home' => 1]);
+
+        if ($onlineOnly) {
+            $freelancerQuery = $freelancerQuery->where('users.status', 1);
+        }
+
+        $freelancer = $freelancerQuery->get();
+
+        if ($shouldFilterBySchedule) {
+            $weekId = ($availabilityDate ?? Carbon::now(config('app.timezone')))->dayOfWeek;
+            $providerIds = Arr::collapse([$salon->pluck('uid')->toArray(), $freelancer->pluck('uid')->toArray()]);
+            $providerSlots = $this->fetchProviderSlots($providerIds, $weekId);
+
+            $salon = $salon->filter(function ($provider) use ($providerSlots, $timeWindow) {
+                return $this->providerHasAvailability($provider->uid, $providerSlots, $timeWindow);
+            })->values();
+
+            $freelancer = $freelancer->filter(function ($provider) use ($providerSlots, $timeWindow) {
+                return $this->providerHasAvailability($provider->uid, $providerSlots, $timeWindow);
+            })->values();
+        }
+
         foreach ($freelancer as $loop) {
             $loop->distance = round($loop->distance, 2);
         }
@@ -167,6 +216,129 @@ class SalonController extends Controller
             'status' => 200,
         ];
         return response()->json($response, 200);
+    }
+
+    private function resolveTimeWindow(?string $timeFilter, ?string $customStart, ?string $customEnd): ?array
+    {
+        $timeFilter = strtolower((string) $timeFilter);
+        $presets = [
+            'morning' => ['05:00 am', '11:59 am'],
+            'afternoon' => ['12:00 pm', '04:59 pm'],
+            'evening' => ['05:00 pm', '09:59 pm'],
+        ];
+
+        if (isset($presets[$timeFilter])) {
+            return $this->timeWindowFromStrings($presets[$timeFilter][0], $presets[$timeFilter][1]);
+        }
+
+        if ($timeFilter === 'custom' || ($customStart && $customEnd)) {
+            return $this->timeWindowFromStrings($customStart, $customEnd);
+        }
+
+        return null;
+    }
+
+    private function timeWindowFromStrings(?string $start, ?string $end): ?array
+    {
+        $startMinutes = $this->convertTimeToMinutes($start);
+        $endMinutes = $this->convertTimeToMinutes($end);
+
+        if ($startMinutes === null || $endMinutes === null || $endMinutes <= $startMinutes) {
+            return null;
+        }
+
+        return [
+            'start' => $startMinutes,
+            'end' => $endMinutes,
+        ];
+    }
+
+    private function convertTimeToMinutes(?string $value): ?int
+    {
+        if (!$value) {
+            return null;
+        }
+        try {
+            $time = Carbon::parse($value, config('app.timezone'));
+        } catch (\Exception $exception) {
+            return null;
+        }
+
+        return ($time->hour * 60) + $time->minute;
+    }
+
+    private function resolveAvailabilityDate(?string $availabilityFilter): ?Carbon
+    {
+        return match ($availabilityFilter) {
+            'today' => Carbon::today(config('app.timezone')),
+            'tomorrow' => Carbon::tomorrow(config('app.timezone')),
+            default => null,
+        };
+    }
+
+    private function fetchProviderSlots(array $uids, int $weekId): array
+    {
+        if (empty($uids)) {
+            return [];
+        }
+
+        $uids = array_unique($uids);
+
+        $timeslots = Timeslots::whereIn('uid', $uids)
+            ->where('week_id', $weekId)
+            ->where('status', 1)
+            ->get();
+
+        $result = [];
+
+        foreach ($timeslots as $slotRow) {
+            $slots = json_decode($slotRow->slots, true);
+            if (!is_array($slots)) {
+                continue;
+            }
+            if (!array_key_exists($slotRow->uid, $result)) {
+                $result[$slotRow->uid] = [];
+            }
+            foreach ($slots as $slot) {
+                if (!is_array($slot)) {
+                    continue;
+                }
+                $result[$slotRow->uid][] = $slot;
+            }
+        }
+
+        return $result;
+    }
+
+    private function providerHasAvailability(int $uid, array $providerSlots, ?array $timeWindow): bool
+    {
+        if (!array_key_exists($uid, $providerSlots)) {
+            return false;
+        }
+
+        foreach ($providerSlots[$uid] as $slot) {
+            $start = $this->convertTimeToMinutes($slot['start_time'] ?? null);
+            $end = $this->convertTimeToMinutes($slot['end_time'] ?? null);
+
+            if ($start === null || $end === null) {
+                continue;
+            }
+
+            if ($timeWindow === null) {
+                return true;
+            }
+
+            if ($this->rangesOverlap($start, $end, $timeWindow['start'], $timeWindow['end'])) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function rangesOverlap(int $startA, int $endA, int $startB, int $endB): bool
+    {
+        return $startA <= $endB && $startB <= $endA;
     }
 
     public function getHomeData(Request $request)

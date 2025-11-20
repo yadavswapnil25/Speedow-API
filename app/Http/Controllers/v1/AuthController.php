@@ -12,6 +12,7 @@ use PHPOpenSourceSaver\JWTAuth\Exceptions\TokenExpiredException;
 use PHPOpenSourceSaver\JWTAuth\Exceptions\TokenInvalidException;
 use PHPOpenSourceSaver\JWTAuth\Exceptions\JWTException;
 use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Facades\Log;
 use Validator;
 use Carbon\Carbon;
 use App\Models\Individual;
@@ -1365,28 +1366,47 @@ class AuthController extends Controller
                 'email' => $request->email,
                 'status' => 0,
             ]);
-            $mailTo = Mail::send(
-                'mails/register',
-                [
-                    'app_name' => $generalInfo->name,
-                    'otp' => $otp
-                ]
-                ,
-                function ($message) use ($mail, $username, $subject, $generalInfo) {
-                    $message->to($mail, $username)
-                        ->subject($subject);
-                    $message->from($generalInfo->email, $generalInfo->name);
-                }
-            );
+            
+            try {
+                $mailTo = Mail::send(
+                    'mails/register',
+                    [
+                        'app_name' => $generalInfo->name,
+                        'otp' => $otp
+                    ]
+                    ,
+                    function ($message) use ($mail, $username, $subject, $generalInfo) {
+                        $message->to($mail, $username)
+                            ->subject($subject);
+                        $message->from($generalInfo->email, $generalInfo->name);
+                    }
+                );
 
-            $response = [
-                'data' => true,
-                'mail' => $mailTo,
-                'otp_id' => $savedOTP->id,
-                'success' => true,
-                'status' => 200,
-            ];
-            return response()->json($response, 200);
+                $response = [
+                    'data' => true,
+                    'mail' => $mailTo,
+                    'otp_id' => $savedOTP->id,
+                    'success' => true,
+                    'status' => 200,
+                ];
+                return response()->json($response, 200);
+            } catch (\Exception $e) {
+                Log::error('Email sending failed: ' . $e->getMessage(), [
+                    'email' => $request->email,
+                    'exception' => $e
+                ]);
+                
+                // Still return success with OTP so user can proceed
+                $response = [
+                    'data' => true,
+                    'mail' => false,
+                    'otp_id' => $savedOTP->id,
+                    'success' => true,
+                    'status' => 200,
+                    'message' => 'OTP generated successfully. Please check your email. If you do not receive it, contact support.',
+                ];
+                return response()->json($response, 200);
+            }
         }
 
         $response = [
@@ -1787,28 +1807,88 @@ class AuthController extends Controller
             'email' => $request->email,
             'status' => 0,
         ]);
-        $mailTo = Mail::send(
-            'mails/reset',
-            [
-                'app_name' => $settings->name,
-                'otp' => $otp
-            ]
-            ,
-            function ($message) use ($mail, $username, $subject, $settings) {
-                $message->to($mail, $username)
-                    ->subject($subject);
-                $message->from($settings->email, $settings->name);
-            }
-        );
+        
+        try {
+            // Log email attempt with full configuration
+            $mailConfig = [
+                'mailer' => config('mail.default'),
+                'host' => config('mail.mailers.' . config('mail.default') . '.host'),
+                'port' => config('mail.mailers.' . config('mail.default') . '.port'),
+                'encryption' => config('mail.mailers.' . config('mail.default') . '.encryption'),
+                'from_address' => config('mail.from.address'),
+                'from_name' => config('mail.from.name'),
+            ];
+            
+            Log::info('Attempting to send email', [
+                'to' => $mail,
+                'from' => $settings->email,
+                'mail_config' => $mailConfig,
+                'subject' => $subject
+            ]);
 
-        $response = [
-            'data' => true,
-            'mail' => $mailTo,
-            'otp_id' => $savedOTP->id,
-            'success' => true,
-            'status' => 200,
-        ];
-        return response()->json($response, 200);
+            // Force use of SparkPost mailer if failover is set
+            $mailer = config('mail.default');
+            if ($mailer === 'failover') {
+                // Use SparkPost directly to ensure it's actually used
+                $mailer = 'smtp_sparkpost';
+                Log::info('Failover detected, forcing SparkPost mailer');
+            }
+
+            $mailTo = Mail::mailer($mailer)->send(
+                'mails/reset',
+                [
+                    'app_name' => $settings->name,
+                    'otp' => $otp
+                ],
+                function ($message) use ($mail, $username, $subject, $settings) {
+                    $message->to($mail, $username)
+                        ->subject($subject);
+                    // Use settings email or fallback to config
+                    $fromEmail = $settings->email ?? config('mail.from.address');
+                    $fromName = $settings->name ?? config('mail.from.name');
+                    $message->from($fromEmail, $fromName);
+                    // Add reply-to header
+                    $message->replyTo($fromEmail, $fromName);
+                }
+            );
+
+            Log::info('Email sent successfully via ' . $mailer, [
+                'to' => $mail,
+                'mailer_used' => $mailer,
+                'result' => $mailTo
+            ]);
+
+            $response = [
+                'data' => true,
+                'mail' => $mailTo,
+                'otp_id' => $savedOTP->id,
+                'success' => true,
+                'status' => 200,
+                'message' => 'OTP sent successfully. Please check your email (including spam folder).',
+            ];
+            return response()->json($response, 200);
+        } catch (\Exception $e) {
+            Log::error('Email sending failed: ' . $e->getMessage(), [
+                'email' => $request->email,
+                'from' => $settings->email ?? 'not set',
+                'mailer' => config('mail.default'),
+                'exception' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            
+            // Still return success with OTP so user can proceed
+            // The OTP is saved in database, so they can still use it
+            $response = [
+                'data' => true,
+                'mail' => false,
+                'otp_id' => $savedOTP->id,
+                'success' => true,
+                'status' => 200,
+                'message' => 'OTP generated successfully. Please check your email. If you do not receive it, contact support.',
+                'debug' => config('app.debug') ? $e->getMessage() : null,
+            ];
+            return response()->json($response, 200);
+        }
 
     }
 
@@ -1886,28 +1966,47 @@ class AuthController extends Controller
                 'email' => $request->email,
                 'status' => 0,
             ]);
-            $mailTo = Mail::send(
-                'mails/register',
-                [
-                    'app_name' => $settings->name,
-                    'otp' => $otp
-                ]
-                ,
-                function ($message) use ($mail, $username, $subject, $settings) {
-                    $message->to($mail, $username)
-                        ->subject($subject);
-                    $message->from($settings->email, $settings->name);
-                }
-            );
+            
+            try {
+                $mailTo = Mail::send(
+                    'mails/register',
+                    [
+                        'app_name' => $settings->name,
+                        'otp' => $otp
+                    ]
+                    ,
+                    function ($message) use ($mail, $username, $subject, $settings) {
+                        $message->to($mail, $username)
+                            ->subject($subject);
+                        $message->from($settings->email, $settings->name);
+                    }
+                );
 
-            $response = [
-                'data' => true,
-                'mail' => $mailTo,
-                'otp_id' => $savedOTP->id,
-                'success' => true,
-                'status' => 200,
-            ];
-            return response()->json($response, 200);
+                $response = [
+                    'data' => true,
+                    'mail' => $mailTo,
+                    'otp_id' => $savedOTP->id,
+                    'success' => true,
+                    'status' => 200,
+                ];
+                return response()->json($response, 200);
+            } catch (\Exception $e) {
+                Log::error('Email sending failed: ' . $e->getMessage(), [
+                    'email' => $request->email,
+                    'exception' => $e
+                ]);
+                
+                // Still return success with OTP so user can proceed
+                $response = [
+                    'data' => true,
+                    'mail' => false,
+                    'otp_id' => $savedOTP->id,
+                    'success' => true,
+                    'status' => 200,
+                    'message' => 'OTP generated successfully. Please check your email. If you do not receive it, contact support.',
+                ];
+                return response()->json($response, 200);
+            }
         }
         $response = [
             'success' => false,
@@ -2258,5 +2357,107 @@ class AuthController extends Controller
             'status' => 200,
         ];
         return response()->json($response, 200);
+    }
+
+    public function testEmail(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            'email' => 'required|email',
+        ]);
+        
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Validation Error.',
+                'errors' => $validator->errors(),
+                'status' => 500
+            ], 500);
+        }
+
+        $settings = Settings::take(1)->first();
+        $testEmail = $request->email;
+        
+        try {
+            // Test 1: Check mail configuration
+            $defaultMailer = config('mail.default');
+            $mailConfig = [
+                'mailer' => $defaultMailer,
+                'host' => config('mail.mailers.' . $defaultMailer . '.host'),
+                'port' => config('mail.mailers.' . $defaultMailer . '.port'),
+                'encryption' => config('mail.mailers.' . $defaultMailer . '.encryption'),
+                'from_address' => config('mail.from.address'),
+                'from_name' => config('mail.from.name'),
+                'settings_email' => $settings->email ?? 'not set',
+                'settings_name' => $settings->name ?? 'not set',
+            ];
+
+            Log::info('Test email attempt', [
+                'to' => $testEmail,
+                'config' => $mailConfig
+            ]);
+
+            // Test 2: Send simple test email - Force SparkPost if failover
+            $mailer = config('mail.default');
+            if ($mailer === 'failover') {
+                $mailer = 'smtp_sparkpost';
+                Log::info('Test email: Failover detected, forcing SparkPost mailer');
+            }
+
+            Mail::mailer($mailer)->send([], [], function ($message) use ($testEmail, $settings) {
+                $message->to($testEmail)
+                    ->subject('Test Email from Speedow API')
+                    ->from($settings->email ?? config('mail.from.address'), $settings->name ?? config('mail.from.name'))
+                    ->html('<h1>Test Email</h1><p>This is a test email from Speedow API.</p><p>If you receive this, email is working correctly.</p><p>Mailer used: ' . config('mail.default') . '</p>');
+            });
+
+            // Test 3: Check if PHP mail() function is available
+            $phpMailAvailable = function_exists('mail');
+            
+            // Test 4: Check sendmail path
+            $sendmailPath = config('mail.mailers.sendmail.path', '/usr/sbin/sendmail -bs -i');
+            $sendmailExists = file_exists(explode(' ', $sendmailPath)[0]);
+
+            Log::info('Test email sent successfully', [
+                'to' => $testEmail,
+                'mailer_used' => $mailer,
+                'php_mail_available' => $phpMailAvailable,
+                'sendmail_path' => $sendmailPath,
+                'sendmail_exists' => $sendmailExists
+            ]);
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Test email sent successfully. Please check your inbox and spam folder.',
+                'mailer_used' => $mailer,
+                'config' => $mailConfig,
+                'php_mail_available' => $phpMailAvailable,
+                'sendmail_path' => $sendmailPath,
+                'sendmail_exists' => $sendmailExists,
+                'sparkpost_note' => 'Check SparkPost dashboard at https://app.sparkpost.com/events for delivery status',
+                'status' => 200
+            ], 200);
+
+        } catch (\Exception $e) {
+            Log::error('Test email failed', [
+                'to' => $testEmail,
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Test email failed: ' . $e->getMessage(),
+                'config' => [
+                    'mailer' => config('mail.default'),
+                    'from_address' => config('mail.from.address'),
+                ],
+                'debug' => config('app.debug') ? [
+                    'error' => $e->getMessage(),
+                    'file' => $e->getFile(),
+                    'line' => $e->getLine(),
+                ] : null,
+                'status' => 500
+            ], 500);
+        }
     }
 }

@@ -8,6 +8,7 @@ use App\Models\Settings;
 use App\Models\User;
 use Validator;
 use DB;
+use Artisan;
 
 class SettingsController extends Controller
 {
@@ -253,5 +254,50 @@ class SettingsController extends Controller
             'status' => 200,
         ];
         return response()->json($response, 200);
+    }
+
+    public function clearCache(Request $request)
+    {
+        try {
+            $cleared = [];
+            
+            // Clear application cache
+            Artisan::call('cache:clear');
+            $cleared[] = 'Application cache cleared';
+            
+            // Clear config cache
+            Artisan::call('config:clear');
+            $cleared[] = 'Config cache cleared';
+            
+            // Clear route cache
+            Artisan::call('route:clear');
+            $cleared[] = 'Route cache cleared';
+            
+            // Clear view cache
+            Artisan::call('view:clear');
+            $cleared[] = 'View cache cleared';
+            
+            // Clear compiled files
+            Artisan::call('clear-compiled');
+            $cleared[] = 'Compiled files cleared';
+            
+            // Optimize (optional - can be slow)
+            // Artisan::call('optimize:clear');
+            
+            $response = [
+                'success' => true,
+                'message' => 'Cache cleared successfully',
+                'cleared' => $cleared,
+                'status' => 200,
+            ];
+            return response()->json($response, 200);
+        } catch (\Exception $e) {
+            $response = [
+                'success' => false,
+                'message' => 'Error clearing cache: ' . $e->getMessage(),
+                'status' => 500,
+            ];
+            return response()->json($response, 500);
+        }
     }
 }

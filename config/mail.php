@@ -13,7 +13,9 @@ return [
     |
     */
 
-    'default' => env('MAIL_MAILER', 'smtp'),
+    // For SparkPost on GoDaddy, use 'smtp_sparkpost' (port 465 with SSL)
+    // Port 587 is blocked on GoDaddy shared hosting, so we use port 465
+    'default' => env('MAIL_MAILER', 'smtp_sparkpost'),
 
     /*
     |--------------------------------------------------------------------------
@@ -34,6 +36,31 @@ return [
     */
 
     'mailers' => [
+        // SparkPost SMTP - Try port 2525 first (alternative port that may work on GoDaddy)
+        'smtp_sparkpost' => [
+            'transport' => 'smtp',
+            'host' => env('MAIL_HOST', 'smtp.sparkpostmail.com'),
+            'port' => env('MAIL_PORT', 2525), // Try 2525 instead of 465
+            'encryption' => env('MAIL_ENCRYPTION', 'tls'), // TLS for port 2525
+            'username' => env('MAIL_USERNAME', 'SMTP_Injection'),
+            'password' => env('MAIL_PASSWORD'),
+            'timeout' => env('MAIL_TIMEOUT', 60),
+            'local_domain' => env('MAIL_EHLO_DOMAIN'),
+        ],
+
+        // SparkPost SMTP - Port 465 with SSL (if 2525 doesn't work)
+        'smtp_sparkpost_465' => [
+            'transport' => 'smtp',
+            'host' => env('MAIL_HOST', 'smtp.sparkpostmail.com'),
+            'port' => 465,
+            'encryption' => 'ssl',
+            'username' => env('MAIL_USERNAME', 'SMTP_Injection'),
+            'password' => env('MAIL_PASSWORD'),
+            'timeout' => env('MAIL_TIMEOUT', 60),
+            'local_domain' => env('MAIL_EHLO_DOMAIN'),
+        ],
+
+        // Standard SMTP (port 587 with TLS) - May not work on GoDaddy
         'smtp' => [
             'transport' => 'smtp',
             'url' => env('MAIL_URL'),
@@ -42,7 +69,36 @@ return [
             'encryption' => env('MAIL_ENCRYPTION', 'tls'),
             'username' => env('MAIL_USERNAME'),
             'password' => env('MAIL_PASSWORD'),
-            'timeout' => null,
+            'timeout' => env('MAIL_TIMEOUT', 60),
+            'local_domain' => env('MAIL_EHLO_DOMAIN'),
+        ],
+
+        // GoDaddy shared hosting SMTP configuration (alternative)
+        'smtp_godaddy' => [
+            'transport' => 'smtp',
+            'host' => env('MAIL_HOST', 'relay-hosting.secureserver.net'),
+            'port' => env('MAIL_PORT', 25),
+            'encryption' => env('MAIL_ENCRYPTION', null), // No encryption on port 25
+            'username' => env('MAIL_USERNAME'),
+            'password' => env('MAIL_PASSWORD'),
+            'timeout' => env('MAIL_TIMEOUT', 60),
+        ],
+
+        // SparkPost HTTP API - Works on GoDaddy (no SMTP ports needed)
+        'sparkpost_http' => [
+            'transport' => 'sparkpost_http',
+            'api_key' => env('SPARKPOST_API_KEY', env('MAIL_PASSWORD')), // Use MAIL_PASSWORD as fallback
+        ],
+
+        // Alternative SMTP for shared hosting (port 465 with SSL) - Legacy name
+        'smtp_ssl' => [
+            'transport' => 'smtp',
+            'host' => env('MAIL_HOST', 'smtp.sparkpostmail.com'),
+            'port' => env('MAIL_PORT', 465),
+            'encryption' => env('MAIL_ENCRYPTION', 'ssl'), // SSL for port 465
+            'username' => env('MAIL_USERNAME'),
+            'password' => env('MAIL_PASSWORD'),
+            'timeout' => env('MAIL_TIMEOUT', 60),
             'local_domain' => env('MAIL_EHLO_DOMAIN'),
         ],
 
@@ -67,6 +123,8 @@ return [
 
         'sendmail' => [
             'transport' => 'sendmail',
+            // GoDaddy shared hosting typically uses this path
+            // If this doesn't work, try: '/usr/sbin/sendmail -t -i' or '/usr/lib/sendmail -bs -i'
             'path' => env('MAIL_SENDMAIL_PATH', '/usr/sbin/sendmail -bs -i'),
         ],
 
@@ -79,10 +137,12 @@ return [
             'transport' => 'array',
         ],
 
+        // Failover: Try SparkPost first, then sendmail (works on GoDaddy), then log
         'failover' => [
             'transport' => 'failover',
             'mailers' => [
-                'smtp',
+                'smtp_sparkpost',
+                'sendmail',
                 'log',
             ],
         ],

@@ -76,6 +76,7 @@ Route::prefix('/v1')->group(function () {
     Route::post('auth/createIndividualAccount', [AuthController::class, 'createIndividualAccount']);
     Route::post('auth/verifyEmailForReset', [AuthController::class, 'verifyEmailForReset']);
     Route::get('auth/firebaseauth', [AuthController::class, 'firebaseauth']);
+    Route::post('auth/testEmail', [AuthController::class, 'testEmail']);
     Route::group(['middleware' => ['jwt', 'jwt.auth']], function () {
 
         Route::post('profile/getByID', [AuthController::class, 'getByID']);
@@ -340,6 +341,7 @@ Route::prefix('/v1')->group(function () {
         Route::get('settings/getById', [SettingsController::class, 'getById']);
         Route::post('settings/update', [SettingsController::class, 'update']);
         Route::post('settings/save', [SettingsController::class, 'save']);
+        Route::post('settings/clearCache', [SettingsController::class, 'clearCache']);
 
         Route::get('users/admins', [AuthController::class, 'admins']);
         Route::post('users/deleteUser', [AuthController::class, 'delete']);
